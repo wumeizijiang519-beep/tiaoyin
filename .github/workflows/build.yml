@@ -1,0 +1,42 @@
+name: Build and test
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  core-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build --parallel
+      - run: ctest --test-dir build --output-on-failure
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build, test and package
+        shell: pwsh
+        run: ./scripts/build.ps1
+      - name: API startup smoke test (no audio streams)
+        shell: pwsh
+        run: |
+          $p = Start-Process ./build/Release/Tiaoyin.exe -ArgumentList '--smoke-test' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Startup smoke test failed ($($p.ExitCode))." }
+          Get-Content smoke-test.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Tiaoyin-Windows-x64
+          path: dist/Tiaoyin-Windows-x64/
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-test-logs
+          path: |
+            build/Testing/Temporary/LastTest.log
+            smoke-test.txt
+          if-no-files-found: ignore

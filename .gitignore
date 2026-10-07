@@ -1,0 +1,8 @@
+build*/
+dist/
+.vs/
+*.user
+*.suo
+*.wav
+smoke-test.txt
+*.log
