@@ -123,10 +123,10 @@ struct App {
         };
         for(const auto& label:labels)add(label.first,L"STATIC",label.second);
         combo(In,{},0);combo(Out,{},0);
-        combo(Mode,{L"WASAPI 共享",L"WASAPI 独占"},std::clamp(setting(L"mode",0),0,1));
+        combo(Mode,{L"WASAPI 共享",L"WASAPI 独占",L"输入独占 / 输出共享"},std::clamp(setting(L"mode",0),0,2));
         combo(Period,{L"1.5 ms · 激进",L"3 ms · 低延迟",L"6 ms · 平衡",L"10 ms · 稳健"},std::clamp(setting(L"period",1),0,3));
         combo(Rate,{L"44,100 Hz",L"48,000 Hz",L"96,000 Hz"},std::clamp(setting(L"rate",1),0,2));
-        combo(Safety,{L"1 块 · 紧凑",L"2 块 · 稳健",L"3 块 · 兼容"},std::clamp(setting(L"safety",0),0,2));
+        combo(Safety,{L"紧凑 · 共享短队列",L"2 块 · 稳健",L"3 块 · 兼容"},std::clamp(setting(L"safety",0),0,2));
         combo(Route,{L"通道 1 → 双耳",L"通道 2 → 双耳",L"前两路立体声",L"前两路混合 → 双耳"},std::clamp(setting(L"route",0),0,3));
         add(Raw,L"BUTTON",L"优先 RAW（共享模式）",BS_AUTOCHECKBOX|WS_TABSTOP);check(Raw,setting(L"raw",1)!=0);
         add(Refresh,L"BUTTON",L"刷新设备",BS_PUSHBUTTON|WS_TABSTOP);
@@ -228,7 +228,7 @@ struct App {
     void enable_controls() {
         const auto state=engine.state();const bool busy=state==ty::EngineState::Starting||state==ty::EngineState::Running;
         for(int id:{In,Out,Mode,Period,Safety,Route,Refresh})EnableWindow(c(id),!busy);
-        EnableWindow(c(Rate),!busy&&index(Mode)==1);EnableWindow(c(Raw),!busy&&index(Mode)==0);
+        EnableWindow(c(Rate),!busy&&index(Mode)!=0);EnableWindow(c(Raw),!busy&&index(Mode)!=1);
         EnableWindow(c(Record),state==ty::EngineState::Running||engine.recorder.active());
         text(Start,busy?L"停止监听  F8":L"开始监听  F8");
     }
@@ -237,7 +237,8 @@ struct App {
         if(index(In)<0||index(Out)<0){MessageBoxW(window,L"请选择实际存在的本地输入和输出设备。",L"设备选择",MB_OK|MB_ICONINFORMATION);return;}
         if(!checked(Confirm)){MessageBoxW(window,L"请先接好有线耳机，降低系统及耳机音量，再勾选确认。外放会形成声反馈，限幅不等于防啸叫。",L"监听前检查",MB_OK|MB_ICONWARNING);return;}
         remember_selection();sync_parameters();ty::StreamConfig config;
-        config.inputId=selectedInput;config.outputId=selectedOutput;config.exclusive=index(Mode)==1;config.raw=checked(Raw);
+        config.inputId=selectedInput;config.outputId=selectedOutput;
+        config.inputExclusive=index(Mode)!=0;config.outputExclusive=index(Mode)==1;config.raw=checked(Raw);
         const unsigned rates[]{44100,48000,96000};const double periods[]{1.5,3,6,10};
         config.exclusiveRate=rates[std::clamp(index(Rate),0,2)];config.periodMs=periods[std::clamp(index(Period),0,3)];config.safetyBlocks=static_cast<unsigned>(std::clamp(index(Safety),0,2)+1);
         failedShown=recordFaultShown=false;
@@ -270,17 +271,19 @@ struct App {
         o<<L"格式：输入 "<<s.inputRate<<L" Hz / "<<s.inputChannels<<L" ch  →  输出 "<<s.outputRate<<L" Hz / "<<s.outputChannels<<L" ch\r\n";
         o<<L"实际周期：输入 "<<s.inputPeriod<<L" 帧（"<<(s.inputRate?1000.0*s.inputPeriod/s.inputRate:0)<<L" ms），输出 "<<s.outputPeriod<<L" 帧（"<<(s.outputRate?1000.0*s.outputPeriod/s.outputRate:0)<<L" ms）；容量 "<<s.inputBuffer<<L" / "<<s.outputBuffer<<L" 帧\r\n";
         o<<L"驱动报告延迟 "<<s.inputLatencyMs<<L" + "<<s.outputLatencyMs<<L" ms；软件排队约 "<<s.queueMs<<L" ms；以上均非端到端实测\r\n";
+        o<<L"软件储备目标 "<<s.reserveMs<<L" ms；驱动共享最小周期 入/出 "<<s.inputMinPeriod<<L" / "<<s.outputMinPeriod<<L" 帧（0 表示未取得）\r\n";
         o<<L"队列欠载 "<<s.underruns<<L"；重同步 "<<s.resyncs<<L"；丢弃帧 "<<s.discarded<<L"；采集不连续 "<<s.discontinuities<<L"；输入削波 "<<s.clipped<<L"；限幅采样 "<<s.limited<<L"\r\n";
         o<<L"时钟补偿 "<<s.driftPpm<<L" ppm；处理负荷约 "<<s.loadPercent<<L"%；MMCSS "<<(s.mmcss?L"已启用":L"不可用")<<L"\r\n";
         o<<L"低周期路径 入/出："<<(s.inputLowLatency?L"启用":L"传统共享回退")<<L" / "<<(s.outputLowLatency?L"启用":L"传统共享回退")
          <<L"；RAW 入/出："<<(s.inputRaw?L"是":L"否")<<L" / "<<(s.outputRaw?L"是":L"否")<<L"\r\n";
+        o<<L"端点模式 入/出："<<(s.inputExclusive?L"独占":L"共享")<<L" / "<<(s.outputExclusive?L"独占":L"共享")<<L"\r\n";
         o<<L"录音 "<<engine.recorder.frames_written()<<L" 帧；录音故障码 "<<engine.recorder.fault()<<L"。设备拔出不会自动恢复或转向扬声器。";
         return o.str();
     }
     void report() {
         auto path=choose_file(L"Text report (*.txt)\0*.txt\0\0",L"txt",(folder/L"tiaoyin-diagnostics.txt").wstring());if(path.empty())return;
         std::ofstream out(path,std::ios::binary);out<<"\xEF\xBB\xBF";
-        out<<"Tiaoyin 0.1.0 diagnostics\nNo hardware latency measurement has been performed by this report.\n";
+        out<<"Tiaoyin 0.1.2 hybrid-output diagnostics\nNo hardware latency measurement has been performed by this report.\n";
         out<<"Input endpoint: "<<wide_to_utf8(selectedInput)<<"\nOutput endpoint: "<<wide_to_utf8(selectedOutput)<<"\n";
         out<<wide_to_utf8(diagnostics())<<"\nLast error: "<<wide_to_utf8(engine.last_error())<<"\n";out.flush();
         if(!out)MessageBoxW(window,L"诊断文件写入失败。",L"导出失败",MB_OK|MB_ICONERROR);
@@ -332,9 +335,9 @@ struct App {
     void help() {
         MessageBoxW(window,
             L"1. 接好有线耳机，先降低系统与耳机音量。选择本地输入、输出并勾选耳机确认。\n"
-            L"2. 先用共享模式 / 3 ms / 1 块；开始后逐渐调耳返音量。设备协商结果以诊断为准。\n"
+            L"2. 需要同时播放伴奏时，优先用『输入独占 / 输出共享』/ 3 ms / 1 块；不兼容再用全共享。\n"
             L"3. 出现爆音/欠载：停止，改 6 ms 或 2 块。稳定后才尝试 1.5 ms 或独占模式。\n"
-            L"4. 共享模式可与伴奏软件共用设备；独占模式可能占用设备，其他软件无法发声。\n"
+            L"4. 全共享和输入独占/输出共享可与伴奏共用耳机；全独占输出会使其他软件无法发声。\n"
             L"5. 旁通关闭低切、噪声门、压缩和 EQ；输入增益、耳返音量、静音和安全限幅仍有效。\n"
             L"6. 录音保存处理后的双声道 PCM16 WAV；静音同步录入。磁盘写入在独立线程。\n\n"
             L"F8 开始/停止；F9 静音；Esc 紧急停止。断开设备后不会自动切到扬声器。\n"

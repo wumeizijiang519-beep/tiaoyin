@@ -128,12 +128,14 @@ Frame MonitorGain::process(Frame x) noexcept {
     if(std::abs(x.r)>.95f) ++limited_;
     return {std::clamp(x.l,-.95f,.95f),std::clamp(x.r,-.95f,.95f)};
 }
-void AudioBridge::reset(unsigned inRate,unsigned outRate,std::size_t cq,std::size_t rq,unsigned blocks) {
+void AudioBridge::reset(unsigned inRate,unsigned outRate,std::size_t cq,std::size_t rq,unsigned blocks,std::size_t compactReserveFrames) {
     if(inRate<8000||outRate<8000||inRate>192000||outRate>192000||!cq||!rq||cq>192000||rq>192000)
         throw std::invalid_argument("Invalid audio bridge format/quantum");
     ratio_=static_cast<double>(inRate)/outRate; outputRate_=outRate;
     quantum_=std::max(cq,static_cast<std::size_t>(std::ceil(rq*ratio_)));
     target_=quantum_*std::clamp(blocks,1u,4u);
+    compact_=blocks==1 && compactReserveFrames>0;
+    if(compact_)target_=std::min(target_,std::max<std::size_t>(32,compactReserveFrames));
     ring_.assign(std::max<std::size_t>(8192,(target_+quantum_)*8+taps),{});
     kernel_.resize(phases+1);
     const double cutoff=.94*std::min(1.0,1.0/(ratio_*1.002));
@@ -167,6 +169,11 @@ void AudioBridge::render(Frame* out,std::size_t count) noexcept {
     const std::size_t needed=static_cast<std::size_t>(std::ceil(count*ratio_*1.002))+taps;
     if(!primed_) {
         if(size_<needed+target_) { std::fill_n(out,count,Frame{}); return; }
+        // Whole capture packets may overshoot the startup reserve by a quantum.
+        // Trim only before starting/fading in, never on every normal packet.
+        if(compact_ && size_>needed+target_) {
+            const auto drop=size_-(needed+target_);advance(drop);discarded_+=drop;
+        }
         primed_=true; fade_=0;
     }
     if(size_>needed+target_+3*quantum_) {

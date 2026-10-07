@@ -44,7 +44,7 @@ struct Client {
     ComPtr<IAudioRenderClient> render;
     PcmFormat format;
     std::vector<std::uint8_t> wave;
-    UINT32 buffer=0,period=0;
+    UINT32 buffer=0,period=0,minPeriod=0;
     REFERENCE_TIME reportedLatency=0;
     bool exclusive=false,lowLatency=false,raw=false,started=false;
     ~Client(){if(started&&audio)audio->Stop();}
@@ -104,19 +104,19 @@ void choose_exclusive_format(Client& c,unsigned rate,const WAVEFORMATEX* mix) {
     throw AudioFailure{AUDCLNT_E_UNSUPPORTED_FORMAT,L"独占模式不支持所选采样率；尝试 48/44.1 kHz 或共享模式"};
 }
 void open_client(Client& c,const std::wstring& id,bool isCapture,const StreamConfig& config) {
-    c.exclusive=config.exclusive;
+    c.exclusive=isCapture?config.inputExclusive:config.outputExclusive;
     auto e=enumerator();check(e->GetDevice(id.c_str(),&c.endpoint),L"查找所选设备（未自动替换）");
-    activate(c,config.raw&&!config.exclusive);
+    activate(c,config.raw&&!c.exclusive);
     WAVEFORMATEX* mixRaw=nullptr;check(c.audio->GetMixFormat(&mixRaw),L"读取设备格式");
     std::unique_ptr<WAVEFORMATEX,TaskMemDelete> mix(mixRaw);
-    if(config.exclusive)choose_exclusive_format(c,config.exclusiveRate,mix.get());
+    if(c.exclusive)choose_exclusive_format(c,config.exclusiveRate,mix.get());
     else {
         const auto bytes=sizeof(WAVEFORMATEX)+mix->cbSize;c.wave.resize(bytes);std::memcpy(c.wave.data(),mix.get(),bytes);
     }
     const auto* wf=reinterpret_cast<const WAVEFORMATEX*>(c.wave.data());c.format=parse_format(wf);
     HRESULT hr=E_FAIL;
     const DWORD flags=AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
-    if(config.exclusive) {
+    if(c.exclusive) {
         REFERENCE_TIME def=0,min=0;check(c.audio->GetDevicePeriod(&def,&min),L"读取独占周期");
         REFERENCE_TIME duration=std::max(min,static_cast<REFERENCE_TIME>(std::llround(config.periodMs*10000)));
         hr=c.audio->Initialize(AUDCLNT_SHAREMODE_EXCLUSIVE,flags,duration,duration,wf,nullptr);
@@ -132,6 +132,7 @@ void open_client(Client& c,const std::wstring& id,bool isCapture,const StreamCon
         if(SUCCEEDED(c.audio.As(&v3))) {
             UINT32 def=0,step=0,lo=0,hi=0;
             if(SUCCEEDED(v3->GetSharedModeEnginePeriod(wf,&def,&step,&lo,&hi))&&step>0&&hi>=lo) {
+                c.minPeriod=lo;
                 const auto requested=static_cast<UINT32>(std::ceil(config.periodMs*c.format.rate/1000));
                 const UINT32 lower=((std::max(lo,requested)+step-1)/step)*step;
                 c.period=std::min(lower,(hi/step)*step);
@@ -158,8 +159,11 @@ void open_client(Client& c,const std::wstring& id,bool isCapture,const StreamCon
     else check(c.audio->GetService(IID_PPV_ARGS(&c.render)),L"获取输出服务");
 }
 struct Mmcss {
-    DWORD task=0;HANDLE handle=AvSetMmThreadCharacteristicsW(L"Pro Audio",&task);
-    Mmcss(){if(handle)AvSetMmThreadPriority(handle,AVRT_PRIORITY_CRITICAL);}
+    // Keep the event-driven audio worker above ordinary application work without
+    // using the Pro Audio/CRITICAL combination.  The latter can starve VPN and
+    // network service threads on some systems even when average CPU use is low.
+    DWORD task=0;HANDLE handle=AvSetMmThreadCharacteristicsW(L"Audio",&task);
+    Mmcss(){if(handle)AvSetMmThreadPriority(handle,AVRT_PRIORITY_HIGH);}
     ~Mmcss(){if(handle)AvRevertMmThreadCharacteristics(handle);}
 };
 void atomic_peak(std::atomic<float>& dst,float value) noexcept {
@@ -200,9 +204,10 @@ std::wstring audio_error(HRESULT hr) {
 }
 void EngineStats::reset() noexcept {
     inputRate=outputRate=inputChannels=outputChannels=0;inputPeriod=outputPeriod=inputBuffer=outputBuffer=0;
+    inputMinPeriod=outputMinPeriod=0;reserveMs=0;
     inputLatencyMs=outputLatencyMs=queueMs=driftPpm=loadPercent=0;inputPeak=outputPeakL=outputPeakR=0;
     underruns=resyncs=discarded=discontinuities=clipped=limited=0;
-    mmcss=inputLowLatency=outputLowLatency=inputRaw=outputRaw=false;
+    mmcss=inputLowLatency=outputLowLatency=inputRaw=outputRaw=inputExclusive=outputExclusive=false;
 }
 WasapiEngine::WasapiEngine(){stopEvent_=CreateEventW(nullptr,TRUE,FALSE,nullptr);if(!stopEvent_)throw std::runtime_error("CreateEvent failed");}
 WasapiEngine::~WasapiEngine(){stop();CloseHandle(stopEvent_);}
@@ -227,7 +232,13 @@ void WasapiEngine::run(StreamConfig config) noexcept {
         stats.inputPeriod=in.period;stats.outputPeriod=out.period;stats.inputBuffer=in.buffer;stats.outputBuffer=out.buffer;
         stats.inputLatencyMs=in.reportedLatency/10000.0;stats.outputLatencyMs=out.reportedLatency/10000.0;
         stats.inputLowLatency=in.lowLatency;stats.outputLowLatency=out.lowLatency;stats.inputRaw=in.raw;stats.outputRaw=out.raw;
-        AudioBridge bridge;bridge.reset(in.format.rate,out.format.rate,in.period,out.period,config.safetyBlocks);
+        stats.inputExclusive=in.exclusive;stats.outputExclusive=out.exclusive;
+        // Shared compact mode decouples software reserve from a driver's 10 ms
+        // quantum. Two/three blocks retain the original conservative policy.
+        const auto reserve=config.outputExclusive?0u:static_cast<unsigned>(std::ceil(in.format.rate*std::max(2.0,config.periodMs)/1000.0));
+        AudioBridge bridge;bridge.reset(in.format.rate,out.format.rate,in.period,out.period,config.safetyBlocks,reserve);
+        stats.reserveMs=1000.0*bridge.target_frames()/in.format.rate;
+        stats.inputMinPeriod=in.minPeriod;stats.outputMinPeriod=out.minPeriod;
         VoiceProcessor voice;voice.reset(in.format.rate);MonitorGain gain;gain.reset(out.format.rate);
         std::vector<Frame> scratch(out.buffer); // allocate before entering the audio loop
         Mmcss priority;stats.mmcss=priority.handle!=nullptr;

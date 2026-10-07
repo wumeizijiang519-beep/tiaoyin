@@ -79,7 +79,7 @@ private:
 class AudioBridge {
 public:
     void reset(unsigned inputRate, unsigned outputRate, std::size_t captureQuantum,
-               std::size_t renderQuantum, unsigned safetyBlocks);
+               std::size_t renderQuantum, unsigned safetyBlocks, std::size_t compactReserveFrames = 0);
     void discontinuity() noexcept;
     void push(Frame frame) noexcept;
     void render(Frame* output, std::size_t count) noexcept;
@@ -97,6 +97,7 @@ private:
     double ratio_ = 1, position_ = left, filteredError_ = 0, integral_ = 0, correctionPpm_ = 0;
     unsigned outputRate_ = 48000;
     bool primed_ = false;
+    bool compact_ = false;
     float fade_ = 0;
     std::uint64_t underruns_ = 0, resyncs_ = 0, discarded_ = 0;
     const Frame& at(std::size_t index) const noexcept;

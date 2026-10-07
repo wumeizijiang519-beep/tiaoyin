@@ -67,10 +67,10 @@ void fifo_test(){
     std::thread consumer([&]{for(int i=0;i<count;++i){Frame a;while(!threaded.pop(a))std::this_thread::yield();if(a.l!=float(i))ok=false;}});
     producer.join();consumer.join();require(ok,"Concurrent FIFO order");
 }
-void bridge_test(double ppm,unsigned inRate,unsigned outRate,double seconds){
-    AudioBridge bridge;constexpr std::size_t block=128;
-    bridge.reset(inRate,outRate,static_cast<std::size_t>(std::ceil(block*double(inRate)/outRate)),block,1);
-    std::array<Frame,block> out{};double fraction=0;std::uint64_t sample=0;double energy=0;
+void bridge_test(double ppm,unsigned inRate,unsigned outRate,double seconds,std::size_t block=128,bool compact=false){
+    AudioBridge bridge;
+    bridge.reset(inRate,outRate,static_cast<std::size_t>(std::ceil(block*double(inRate)/outRate)),block,1,compact?inRate/500:0);
+    std::vector<Frame> out(block);double fraction=0;std::uint64_t sample=0;double energy=0;
     const auto begin=std::chrono::steady_clock::now();
     for(unsigned k=0;k<unsigned(seconds*outRate/block);++k){
         fraction+=block*double(inRate)/outRate*(1+ppm*1e-6);
@@ -84,6 +84,7 @@ void bridge_test(double ppm,unsigned inRate,unsigned outRate,double seconds){
     require(bridge.underruns()==0,"ASRC steady stream no underruns");
     require(bridge.resyncs()==0,"ASRC normal drift no hard resync");
     require(energy>100,"ASRC signal present");
+    if(compact) require(bridge.queued_frames()<inRate/200,"Compact queue stays below 5 ms");
     if(seconds>=30)near(bridge.correction_ppm(),ppm,120,"ASRC tracks clock drift");
     std::cout<<"  ASRC "<<inRate<<" -> "<<outRate<<", "<<ppm<<" ppm: queue="<<bridge.queued_frames()<<", correction="<<bridge.correction_ppm()<<", runtime="<<std::chrono::duration<double>(std::chrono::steady_clock::now()-begin).count()<<" s\n";
     for(int i=0;i<200;++i)bridge.render(out.data(),out.size());
@@ -111,6 +112,8 @@ int main(){try{
     fifo_test();std::cout<<"PASS bounded concurrent FIFO\n";
     bridge_test(500,48000,48000,40);bridge_test(-500,48000,48000,40);
     bridge_test(300,44100,48000,40);bridge_test(-300,48000,44100,40);
+    bridge_test(500,48000,48000,120,480,true);bridge_test(-500,48000,48000,120,480,true);
+    bridge_test(300,44100,48000,120,480,true);bridge_test(-300,48000,44100,120,441,true);
     std::cout<<"PASS ASRC/rates/drift/starvation/overrun\n";recording_test();std::cout<<"PASS WAV recording\n";
     std::cout<<"ALL TESTS PASSED ("<<assertions<<" checks)\n";return 0;
 }catch(const std::exception& e){std::cerr<<"FAIL: "<<e.what()<<"\n";return 1;}}
