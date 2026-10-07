@@ -67,7 +67,7 @@ void activate(Client& c,bool requestRaw) {
     c.raw=false;
     ComPtr<IAudioClient2> v2;
     if(SUCCEEDED(c.audio.As(&v2))) {
-        AudioClientProperties props{}; props.cbSize=sizeof(props); props.eCategory=AudioCategory_ProAudio;
+        AudioClientProperties props{}; props.cbSize=sizeof(props); props.eCategory=AudioCategory_Other;
         props.Options=requestRaw?AUDCLNT_STREAMOPTIONS_RAW:AUDCLNT_STREAMOPTIONS_NONE;
         if(SUCCEEDED(v2->SetClientProperties(&props)))c.raw=requestRaw;
         else {props.Options=AUDCLNT_STREAMOPTIONS_NONE; v2->SetClientProperties(&props);}
